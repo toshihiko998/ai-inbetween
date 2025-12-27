@@ -1,13 +1,19 @@
 """
-strokes.py (robust)
+strokes.py (drop-in, robust, NO SYNTAX TRAPS)
 
-Goals:
-- Prefer centerline (skeleton) extraction to avoid outline-walking zigzags
-- But NEVER return zero strokes silently:
-    - auto-invert if binary looks inverted
-    - relax thresholds
-    - fallback to contour-based extraction when skeleton fails
+- Extract strokes from binary line art (lines=255, bg=0)
+- Auto-invert if needed
+- Connect tiny breaks (close + bridge)
+- Try skeleton-based centerline extraction
+- Fallback to contour extraction if skeleton fails
+
+Exports:
+  - Stroke
+  - extract_strokes(binary) -> List[Stroke]
+  - resample_polyline(points, n) -> np.ndarray
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List
@@ -21,16 +27,12 @@ class Stroke:
     points: np.ndarray  # (N,2) float32
 
     @property
-    def centroid(self) -> np.ndarray:
-        return np.mean(self.points, axis=0)
-
-    @property
     def length(self) -> float:
+        if len(self.points) < 2:
+            return 0.0
         diffs = np.diff(self.points, axis=0)
         return float(np.sum(np.linalg.norm(diffs, axis=1)))
 
-
-# ---------- helpers ----------
 
 def _remove_near_duplicates(points: np.ndarray, min_step: float = 0.75) -> np.ndarray:
     if len(points) <= 1:
@@ -42,7 +44,7 @@ def _remove_near_duplicates(points: np.ndarray, min_step: float = 0.75) -> np.nd
     return np.asarray(out, dtype=np.float32)
 
 
-def _smooth_polyline(points: np.ndarray, window: int = 7) -> np.ndarray:
+def _smooth_polyline(points: np.ndarray, window: int = 9) -> np.ndarray:
     pts = points.astype(np.float32)
     n = len(pts)
     if n < 3 or window <= 1:
@@ -67,7 +69,7 @@ def _smooth_polyline(points: np.ndarray, window: int = 7) -> np.ndarray:
     return sm
 
 
-def _simplify_rdp(points: np.ndarray, epsilon: float = 1.0) -> np.ndarray:
+def _simplify_rdp(points: np.ndarray, epsilon: float = 1.5) -> np.ndarray:
     pts = points.astype(np.float32)
     if len(pts) < 3:
         return pts
@@ -76,99 +78,59 @@ def _simplify_rdp(points: np.ndarray, epsilon: float = 1.0) -> np.ndarray:
     return approx.reshape(-1, 2).astype(np.float32)
 
 
-def skeletonize(binary: np.ndarray, max_iters: int = 10000) -> np.ndarray:
+def _skeletonize(binary: np.ndarray, max_iters: int = 10000) -> np.ndarray:
     """
     Morphological skeletonization (no ximgproc).
     Input: uint8, lines=255 bg=0
-    Output: uint8, skeleton lines=255 bg=0
+    Output: uint8 skeleton, lines=255 bg=0
     """
     img = (binary > 0).astype(np.uint8) * 255
     skel = np.zeros_like(img)
 
     element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-
     it = 0
     while True:
         it += 1
         if it > max_iters:
             break
-
         eroded = cv2.erode(img, element)
         opened = cv2.dilate(eroded, element)
         temp = cv2.subtract(img, opened)
         skel = cv2.bitwise_or(skel, temp)
         img = eroded
-
         if cv2.countNonZero(img) == 0:
             break
-
     return skel
 
 
 def _extract_by_contours(binary: np.ndarray, min_points: int, min_length: float) -> List[Stroke]:
-    """Fallback: extract strokes directly from contours of the binary image."""
     contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-    strokes: List[Stroke] = []
+    out: List[Stroke] = []
     for cnt in contours:
         if len(cnt) < min_points:
             continue
         pts = cnt.reshape(-1, 2).astype(np.float32)
-        pts = _remove_near_duplicates(pts, min_step=0.75)
+        pts = _remove_near_duplicates(pts, 0.75)
         if len(pts) < min_points:
             continue
-        stroke = Stroke(points=pts)
-        if stroke.length < min_length:
+        s = Stroke(points=pts)
+        if s.length < min_length:
             continue
-        strokes.append(stroke)
-    return strokes
+        out.append(s)
+    return out
 
-
-# ---------- public API ----------
 
 def extract_strokes(
     binary: np.ndarray,
-    min_points: int = 3,      # ← 下げる
-    min_length: float = 3.0,  # ← 下げる
-    smooth_window: int = 9,   # ← 少し強く
+    min_points: int = 3,
+    min_length: float = 3.0,
+    smooth_window: int = 9,
     simplify_epsilon: float = 1.5,
-  ):-> List[Stroke]:
-      def _merge_close_strokes(strokes, dist_thresh=6.0, angle_thresh=25.0):
-    merged = []
-    used = [False] * len(strokes)
-
-    for i, s in enumerate(strokes):
-        if used[i]:
-            continue
-        pts = [s.points]
-
-        v1 = s.points[-1] - s.points[0]
-        a1 = np.degrees(np.arctan2(v1[1], v1[0]))
-
-        for j in range(i + 1, len(strokes)):
-            if used[j]:
-                continue
-            t = strokes[j]
-            d = np.linalg.norm(s.points[-1] - t.points[0])
-            if d > dist_thresh:
-                continue
-
-            v2 = t.points[-1] - t.points[0]
-            a2 = np.degrees(np.arctan2(v2[1], v2[0]))
-
-            if abs(a1 - a2) < angle_thresh:
-                pts.append(t.points)
-                used[j] = True
-
-        used[i] = True
-        merged_pts = np.vstack(pts)
-        merged.append(Stroke(points=merged_pts))
-
-    return merged
+) -> List[Stroke]:
     """
-    Robust stroke extraction:
-    - auto-invert if needed
-    - skeletonize
-    - if skeleton has too few pixels, fallback to contour method
+    Extract strokes from binary image.
+
+    binary: uint8, expected lines=255 bg=0 (but auto-fixes if inverted)
     """
     if binary.dtype != np.uint8:
         binary = binary.astype(np.uint8)
@@ -177,31 +139,22 @@ def extract_strokes(
     white = int(cv2.countNonZero(binary))
     total = int(h * w)
 
-    # Auto-invert when binary seems inverted (background white, lines black)
-    # If "white" occupies most of the image, likely inverted.
+    # auto invert if background looks white-heavy
     if white > total * 0.6:
         binary = cv2.bitwise_not(binary)
 
-    # ---- Connect broken lines (VERY IMPORTANT) ----
-    # 1) close tiny gaps
+    # ---- connect breaks (important) ----
     k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     prepared = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k_close, iterations=2)
-
-    # 2) bridge 1-2px breaks (light dilation then erode)
-    k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    prepared = cv2.dilate(prepared, k_bridge, iterations=1)
-    prepared = cv2.erode(prepared, k_bridge, iterations=1)
-
-    # 3) remove isolated noise while keeping lines
+    prepared = cv2.dilate(prepared, k_close, iterations=1)
+    prepared = cv2.erode(prepared, k_close, iterations=1)
     prepared = cv2.medianBlur(prepared, 3)
 
-    # optional: thicken slightly before skeletonization
-    prepared = cv2.dilate(prepared, k_close, iterations=1)
-
-    skel = skeletonize(prepared)
-
-    # If skeleton is almost empty, fallback
+    # try skeleton
+    skel = _skeletonize(prepared)
     skel_pixels = int(cv2.countNonZero(skel))
+
+    # fallback if skeleton almost empty
     if skel_pixels < 20:
         return _extract_by_contours(prepared, min_points=min_points, min_length=min_length)
 
@@ -213,7 +166,7 @@ def extract_strokes(
             continue
 
         pts = cnt.reshape(-1, 2).astype(np.float32)
-        pts = _remove_near_duplicates(pts, min_step=0.75)
+        pts = _remove_near_duplicates(pts, 0.75)
         if len(pts) < min_points:
             continue
 
@@ -222,13 +175,12 @@ def extract_strokes(
         if len(pts) < min_points:
             continue
 
-        stroke = Stroke(points=pts)
-        if stroke.length < min_length:
+        s = Stroke(points=pts)
+        if s.length < min_length:
             continue
 
-        strokes.append(stroke)
+        strokes.append(s)
 
-    # Final fallback if still empty
     if not strokes:
         strokes = _extract_by_contours(prepared, min_points=min_points, min_length=min_length)
 
@@ -236,6 +188,10 @@ def extract_strokes(
 
 
 def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
+    """
+    Resample polyline to n points by arc length.
+    points: (N,2)
+    """
     pts = np.asarray(points, dtype=np.float32)
 
     if len(pts) == 0:
@@ -257,8 +213,10 @@ def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
     for i, t in enumerate(target):
         while j < len(dist) - 2 and dist[j + 1] < t:
             j += 1
+
         t0, t1 = dist[j], dist[j + 1]
         p0, p1 = pts[j], pts[j + 1]
+
         if abs(t1 - t0) < 1e-6:
             out[i] = p0
         else:

@@ -24,7 +24,7 @@ class Stroke:
     """
     Represents a single stroke as a polyline.
     """
-    points: np.ndarray  # shape: (N, 2), dtype: int or float
+    points: np.ndarray  # shape: (N, 2), dtype: float32
 
     @property
     def centroid(self) -> np.ndarray:
@@ -51,7 +51,6 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
     if binary.dtype != np.uint8:
         binary = binary.astype(np.uint8)
 
-    # Find contours (each contour ~= one stroke)
     contours, _ = cv2.findContours(
         binary,
         cv2.RETR_LIST,
@@ -64,10 +63,8 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
         if len(cnt) < min_points:
             continue
 
-        # cnt shape: (N, 1, 2) -> (N, 2)
         points = cnt.reshape(-1, 2).astype(np.float32)
 
-        # Remove near-duplicate points
         cleaned = [points[0]]
         for p in points[1:]:
             if np.linalg.norm(p - cleaned[-1]) >= 0.5:
@@ -76,17 +73,20 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
         if len(cleaned) < min_points:
             continue
 
-        strokes.append(Stroke(points=np.array(cleaned)))
+        strokes.append(Stroke(points=np.array(cleaned, dtype=np.float32)))
 
     return strokes
-    def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
+
+
+def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
     """
     Resample polyline to n points by arc length.
-    points: (N,2) float
     """
     pts = np.asarray(points, dtype=np.float32)
+
     if len(pts) == 0:
         return np.zeros((n, 2), dtype=np.float32)
+
     if len(pts) == 1:
         return np.repeat(pts, n, axis=0)
 
@@ -104,12 +104,14 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
     for i, t in enumerate(target):
         while j < len(dist) - 2 and dist[j + 1] < t:
             j += 1
+
         t0, t1 = dist[j], dist[j + 1]
         p0, p1 = pts[j], pts[j + 1]
+
         if abs(t1 - t0) < 1e-6:
             out[i] = p0
         else:
             a = (t - t0) / (t1 - t0)
-            out[i] = (1 - a) * p0 + a * p1
-    return out
+            out[i] = (1.0 - a) * p0 + a * p1
 
+    return out

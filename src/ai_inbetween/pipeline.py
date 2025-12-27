@@ -64,7 +64,7 @@ def run_pipeline(
             interp = (1.0 - alpha) * pa + alpha * pb
             polylines.append(interp)
 
-        frame = render_polylines(polylines, img_a.shape, thickness=thickness)
+        frame = render_polylines(polylines, img_a.shape, thickness=1)
 
         inb_bin = to_line_binary(frame)
         om = overlap_metrics(inb_bin, bin_a, bin_b)

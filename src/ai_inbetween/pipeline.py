@@ -1,12 +1,10 @@
 """
-pipeline.py (safe baseline)
+pipeline.py (minimal safe version)
 
-- No blending/crossfade
-- Extract strokes -> match -> resample -> interpolate -> render
-- Confidence gating is temporarily DISABLED to ensure output lines appear.
+Purpose:
+- Ensure in-between lines are ALWAYS rendered
+- Avoid indentation errors
 """
-
-from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional
@@ -26,14 +24,8 @@ def run_pipeline(
     image_b: Path,
     out_dir: Path,
     inbetween_count: int = 5,
-    thickness = max(1, int(1 + 3 * m.confidence)),
-    n_points: int = 64,
-    # match weights (tune later)
-    w_centroid: float = 1.0,
-    w_len: float = 15.0,
-    w_angle: float = 5.0,
-    w_shape: float = 8.0,
-) -> None:
+    thickness: int = 2,
+):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -41,23 +33,15 @@ def run_pipeline(
     img_b = load_grayscale(image_b)
 
     if img_a.shape != img_b.shape:
-        raise ValueError(f"Resolution mismatch: A={img_a.shape}, B={img_b.shape}")
+        raise ValueError("Keyframes must have same resolution")
 
-    bin_a = binarize_lineart(img_a)  # lines=255, bg=0
+    bin_a = binarize_lineart(img_a)
     bin_b = binarize_lineart(img_b)
 
     strokes_a = extract_strokes(bin_a)
     strokes_b = extract_strokes(bin_b)
 
-    matches = sorted(matches, key=lambda m: m.confidence, reverse=True)[:10]
-        strokes_a,
-        strokes_b,
-        w_centroid=w_centroid,
-        w_len=w_len,
-        w_angle=w_angle,
-        w_shape=w_shape,
-        shape_points=n_points,
-    )
+    matches = match_strokes(strokes_a, strokes_b)
 
     prev_bin: Optional[np.ndarray] = None
 
@@ -67,20 +51,16 @@ def run_pipeline(
         polylines: List[np.ndarray] = []
 
         for m in matches:
-            # confidence gate is disabled for now:
-            # if m.confidence < 0.35:
-            #     continue
-
             sa = strokes_a[m.a_index].points
             sb = strokes_b[m.b_index].points
 
-            pa = resample_polyline(sa, n_points)
-            pb = resample_polyline(sb, n_points)
+            pa = resample_polyline(sa, 64)
+            pb = resample_polyline(sb, 64)
 
             interp = (1.0 - alpha) * pa + alpha * pb
             polylines.append(interp)
 
-        frame = render_polylines([interp], img_a.shape, thickness=thickness)
+        frame = render_polylines(polylines, img_a.shape, thickness=thickness)
 
         inb_bin = to_line_binary(frame)
         om = overlap_metrics(inb_bin, bin_a, bin_b)

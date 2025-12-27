@@ -59,9 +59,11 @@ def _build_inbetween_polylines(
     """
     polylines: List[np.ndarray] = []
 
-    for m in matches:
-        if m.confidence < min_confidence:
-            continue
+for m in matches:
+    # 一旦 confidence 判定を無効化
+    # if m.confidence < min_confidence:
+    #     continue
+
 
         sa = strokes_a[m.a_index].points
         sb = strokes_b[m.b_index].points

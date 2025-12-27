@@ -127,11 +127,43 @@ def _extract_by_contours(binary: np.ndarray, min_points: int, min_length: float)
 
 def extract_strokes(
     binary: np.ndarray,
-    min_points: int = 8,
-    min_length: float = 10.0,
-    smooth_window: int = 7,
-    simplify_epsilon: float = 1.0,
-) -> List[Stroke]:
+    min_points: int = 3,      # ← 下げる
+    min_length: float = 3.0,  # ← 下げる
+    smooth_window: int = 9,   # ← 少し強く
+    simplify_epsilon: float = 1.5,
+  ):-> List[Stroke]:
+      def _merge_close_strokes(strokes, dist_thresh=6.0, angle_thresh=25.0):
+    merged = []
+    used = [False] * len(strokes)
+
+    for i, s in enumerate(strokes):
+        if used[i]:
+            continue
+        pts = [s.points]
+
+        v1 = s.points[-1] - s.points[0]
+        a1 = np.degrees(np.arctan2(v1[1], v1[0]))
+
+        for j in range(i + 1, len(strokes)):
+            if used[j]:
+                continue
+            t = strokes[j]
+            d = np.linalg.norm(s.points[-1] - t.points[0])
+            if d > dist_thresh:
+                continue
+
+            v2 = t.points[-1] - t.points[0]
+            a2 = np.degrees(np.arctan2(v2[1], v2[0]))
+
+            if abs(a1 - a2) < angle_thresh:
+                pts.append(t.points)
+                used[j] = True
+
+        used[i] = True
+        merged_pts = np.vstack(pts)
+        merged.append(Stroke(points=merged_pts))
+
+    return merged
     """
     Robust stroke extraction:
     - auto-invert if needed

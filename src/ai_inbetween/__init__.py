@@ -1,3 +1,1 @@
-src/
-└─ ai_inbetween/
-   └─ __init__.py
+# ai_inbetween package

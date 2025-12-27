@@ -163,6 +163,9 @@ def extract_strokes(
     # 3) remove isolated noise while keeping lines
     prepared = cv2.medianBlur(prepared, 3)
 
+    # optional: thicken slightly before skeletonization
+    prepared = cv2.dilate(prepared, k_close, iterations=1)
+
     skel = skeletonize(prepared)
 
     # If skeleton is almost empty, fallback

@@ -43,6 +43,10 @@ def run_pipeline(
 
     matches = match_strokes(strokes_a, strokes_b)
 
+    # confidenceが一番高い1本だけ使う
+    matches = sorted(matches, key=lambda m: m.confidence, reverse=True)[:1]
+
+
     prev_bin: Optional[np.ndarray] = None
 
     for i in range(1, inbetween_count + 1):

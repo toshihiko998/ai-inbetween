@@ -26,7 +26,7 @@ def run_pipeline(
     image_b: Path,
     out_dir: Path,
     inbetween_count: int = 5,
-    thickness: int = 2,
+    thickness = max(1, int(1 + 3 * m.confidence)),
     n_points: int = 64,
     # match weights (tune later)
     w_centroid: float = 1.0,
@@ -49,7 +49,7 @@ def run_pipeline(
     strokes_a = extract_strokes(bin_a)
     strokes_b = extract_strokes(bin_b)
 
-    matches = match_strokes(
+    matches = sorted(matches, key=lambda m: m.confidence, reverse=True)[:10]
         strokes_a,
         strokes_b,
         w_centroid=w_centroid,
@@ -80,7 +80,7 @@ def run_pipeline(
             interp = (1.0 - alpha) * pa + alpha * pb
             polylines.append(interp)
 
-        frame = render_polylines(polylines, img_a.shape, thickness=thickness)
+        frame = render_polylines([interp], img_a.shape, thickness=thickness)
 
         inb_bin = to_line_binary(frame)
         om = overlap_metrics(inb_bin, bin_a, bin_b)

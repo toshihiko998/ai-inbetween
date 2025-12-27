@@ -150,9 +150,18 @@ def extract_strokes(
     if white > total * 0.6:
         binary = cv2.bitwise_not(binary)
 
-    # Ensure lines are connected enough for skeletonization: close tiny gaps
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    prepared = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # ---- Connect broken lines (VERY IMPORTANT) ----
+    # 1) close tiny gaps
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    prepared = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k_close, iterations=2)
+
+    # 2) bridge 1-2px breaks (light dilation then erode)
+    k_bridge = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    prepared = cv2.dilate(prepared, k_bridge, iterations=1)
+    prepared = cv2.erode(prepared, k_bridge, iterations=1)
+
+    # 3) remove isolated noise while keeping lines
+    prepared = cv2.medianBlur(prepared, 3)
 
     skel = skeletonize(prepared)
 

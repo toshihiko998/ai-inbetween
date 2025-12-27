@@ -79,3 +79,37 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
         strokes.append(Stroke(points=np.array(cleaned)))
 
     return strokes
+    def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
+    """
+    Resample polyline to n points by arc length.
+    points: (N,2) float
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if len(pts) == 0:
+        return np.zeros((n, 2), dtype=np.float32)
+    if len(pts) == 1:
+        return np.repeat(pts, n, axis=0)
+
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    dist = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(dist[-1])
+
+    if total < 1e-6:
+        return np.repeat(pts[:1], n, axis=0)
+
+    target = np.linspace(0.0, total, n)
+    out = np.zeros((n, 2), dtype=np.float32)
+
+    j = 0
+    for i, t in enumerate(target):
+        while j < len(dist) - 2 and dist[j + 1] < t:
+            j += 1
+        t0, t1 = dist[j], dist[j + 1]
+        p0, p1 = pts[j], pts[j + 1]
+        if abs(t1 - t0) < 1e-6:
+            out[i] = p0
+        else:
+            a = (t - t0) / (t1 - t0)
+            out[i] = (1 - a) * p0 + a * p1
+    return out
+

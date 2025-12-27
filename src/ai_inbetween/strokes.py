@@ -1,129 +1,145 @@
 """
-pipeline.py (KEEP-LINES VERSION, CLI COMPAT)
+strokes.py (FINAL: NO CIRCULAR IMPORT)
 
-- Accepts cli.py keywords:
-    run_pipeline(image_a, image_b, out_dir, inbetween_count=?, thickness=?)
-
-- Binarize with Otsu (invert) to keep thin lines
-- Extract strokes via contour-based strokes.py (no skeleton)
+IMPORTANT:
+- NEVER import ".strokes" in this file.
+- Exports:
+    Stroke
+    extract_strokes(...)
+    resample_polyline(...)
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, List, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import cv2
 import numpy as np
 
-from .preprocess import load_grayscale
-from .strokes import extract_strokes, resample_polyline
-from .match import match_strokes
+
+@dataclass
+class Stroke:
+    points: np.ndarray  # (N,2) float32
+
+    @property
+    def centroid(self) -> np.ndarray:
+        if self.points is None or len(self.points) == 0:
+            return np.array([0.0, 0.0], dtype=np.float32)
+        return np.mean(self.points, axis=0).astype(np.float32)
+
+    @property
+    def length(self) -> float:
+        if self.points is None or len(self.points) < 2:
+            return 0.0
+        d = np.diff(self.points, axis=0)
+        return float(np.sum(np.linalg.norm(d, axis=1)))
+
+    @property
+    def bbox(self) -> Tuple[float, float, float, float]:
+        if self.points is None or len(self.points) == 0:
+            return (0.0, 0.0, 0.0, 0.0)
+        mn = np.min(self.points, axis=0)
+        mx = np.max(self.points, axis=0)
+        return (float(mn[0]), float(mn[1]), float(mx[0]), float(mx[1]))
 
 
-def _binarize_keep_lines(gray: np.ndarray) -> np.ndarray:
+def _remove_near_duplicates(points: np.ndarray, min_step: float = 0.5) -> np.ndarray:
+    if len(points) <= 1:
+        return points.astype(np.float32)
+    out = [points[0]]
+    for p in points[1:]:
+        if np.linalg.norm(p - out[-1]) >= min_step:
+            out.append(p)
+    return np.asarray(out, dtype=np.float32)
+
+
+def _simplify_rdp(points: np.ndarray, epsilon: float = 0.6) -> np.ndarray:
+    pts = points.astype(np.float32)
+    if len(pts) < 3:
+        return pts
+    cnt = pts.reshape(-1, 1, 2)
+    approx = cv2.approxPolyDP(cnt, epsilon=epsilon, closed=False)
+    return approx.reshape(-1, 2).astype(np.float32)
+
+
+def extract_strokes(
+    binary: np.ndarray,
+    min_points: int = 8,
+    min_length: float = 6.0,
+    close_ksize: int = 3,
+    close_iter: int = 1,
+    simplify_epsilon: float = 0.6,
+) -> List[Stroke]:
     """
-    Output: uint8 lines=255 bg=0
+    binary: uint8, lines=255 bg=0 (auto invert if needed)
     """
-    if gray.ndim == 3:
-        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    if binary is None:
+        return []
+    if binary.dtype != np.uint8:
+        binary = binary.astype(np.uint8)
 
-    g = gray.astype(np.uint8)
+    h, w = binary.shape[:2]
+    white = int(cv2.countNonZero(binary))
+    total = int(h * w)
 
-    # 軽い平滑化（やりすぎると線が消えるので弱め）
-    g = cv2.GaussianBlur(g, (3, 3), 0)
+    # auto invert if background seems white-heavy
+    if white > total * 0.6:
+        binary = cv2.bitwise_not(binary)
 
-    # Otsu + invert → 線が黒なら線=255 になりやすい
-    _, bw = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # mild close to connect gaps
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
+    prepared = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k, iterations=close_iter)
 
-    # ほんの少しだけ穴埋め（線切れ対策）
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k, iterations=1)
+    contours, _ = cv2.findContours(prepared, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-    return bw
-
-
-def _render(polylines: List[Tuple[np.ndarray, int]], shape_hw) -> np.ndarray:
-    h, w = int(shape_hw[0]), int(shape_hw[1])
-    canvas = np.full((h, w), 255, dtype=np.uint8)
-
-    for pts, t in polylines:
-        if pts is None or len(pts) < 2:
+    strokes: List[Stroke] = []
+    for cnt in contours:
+        if len(cnt) < min_points:
             continue
-        p = np.asarray(pts, dtype=np.float32)
-        p = np.round(p).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(canvas, [p], False, 0, thickness=max(1, int(t)), lineType=cv2.LINE_AA)
+        pts = cnt.reshape(-1, 2).astype(np.float32)
+        pts = _remove_near_duplicates(pts, 0.5)
+        if len(pts) < min_points:
+            continue
+        pts = _simplify_rdp(pts, epsilon=simplify_epsilon)
+        if len(pts) < min_points:
+            continue
+        s = Stroke(points=pts)
+        if s.length < min_length:
+            continue
+        strokes.append(s)
 
-    return canvas
+    return strokes
 
 
-def run_pipeline(
-    image_a: Any,
-    image_b: Any,
-    out_dir: Any,
-    inbetween_count: int = 5,
-    thickness: int = 1,
-    **kwargs: Any,
-) -> None:
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def resample_polyline(points: np.ndarray, n: int) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float32)
 
-    img_a = load_grayscale(Path(image_a))
-    img_b = load_grayscale(Path(image_b))
+    if len(pts) == 0:
+        return np.zeros((n, 2), dtype=np.float32)
+    if len(pts) == 1:
+        return np.repeat(pts, n, axis=0)
 
-    if img_a is None or img_b is None:
-        raise FileNotFoundError(f"Image not found: {image_a} or {image_b}")
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    dist = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(dist[-1])
 
-    if img_a.shape != img_b.shape:
-        raise ValueError(f"Resolution mismatch: A={img_a.shape}, B={img_b.shape}")
+    if total < 1e-6:
+        return np.repeat(pts[:1], n, axis=0)
 
-    # knobs
-    n_points = int(kwargs.get("n_points", 64))
-    main_k = int(kwargs.get("main_k", 1))
-    sub_k = int(kwargs.get("sub_k", 3))
+    target = np.linspace(0.0, total, n)
+    out = np.zeros((n, 2), dtype=np.float32)
 
-    bin_a = _binarize_keep_lines(img_a)
-    bin_b = _binarize_keep_lines(img_b)
+    j = 0
+    for i, t in enumerate(target):
+        while j < len(dist) - 2 and dist[j + 1] < t:
+            j += 1
+        t0, t1 = dist[j], dist[j + 1]
+        p0, p1 = pts[j], pts[j + 1]
+        if abs(t1 - t0) < 1e-6:
+            out[i] = p0
+        else:
+            a = (t - t0) / (t1 - t0)
+            out[i] = (1.0 - a) * p0 + a * p1
 
-    strokes_a = extract_strokes(bin_a)
-    strokes_b = extract_strokes(bin_b)
-
-    print(f"strokes_a={len(strokes_a)} strokes_b={len(strokes_b)}")
-
-    matches = match_strokes(strokes_a, strokes_b)
-    if not matches:
-        print("No matches found.")
-        return
-
-    matches = sorted(matches, key=lambda m: getattr(m, "confidence", 0.0), reverse=True)
-    main_matches = matches[: max(0, main_k)]
-    sub_matches = matches[main_k : main_k + max(0, sub_k)]
-
-    for i in range(1, int(inbetween_count) + 1):
-        alpha = i / (int(inbetween_count) + 1)
-
-        polylines: List[Tuple[np.ndarray, int]] = []
-
-        # 主線
-        for m in main_matches:
-            sa = strokes_a[m.a_index].points
-            sb = strokes_b[m.b_index].points
-            pa = resample_polyline(sa, n_points)
-            pb = resample_polyline(sb, n_points)
-            interp = (1.0 - alpha) * pa + alpha * pb
-            polylines.append((interp, max(1, int(thickness))))
-
-        # 補助線（細め固定にしたいなら 1 に）
-        for m in sub_matches:
-            sa = strokes_a[m.a_index].points
-            sb = strokes_b[m.b_index].points
-            pa = resample_polyline(sa, n_points)
-            pb = resample_polyline(sb, n_points)
-            interp = (1.0 - alpha) * pa + alpha * pb
-            polylines.append((interp, 1))
-
-        frame = _render(polylines, img_a.shape[:2])
-        out_path = out_dir / f"{i:04d}.png"
-        cv2.imwrite(str(out_path), frame)
-
-        print(f"[frame {i:04d}] polylines={len(polylines)}")
+    return out

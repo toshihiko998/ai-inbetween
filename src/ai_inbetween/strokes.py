@@ -63,7 +63,9 @@ def extract_strokes(binary: np.ndarray, min_points: int = 10) -> List[Stroke]:
         if len(cnt) < min_points:
             continue
 
-        points = cnt.reshape(-1, 2).astype(np.float32)
+        # 抽出した points に軽い平滑化を入れる
+        points = cv2.approxPolyDP(points, epsilon=1.5, closed=False)
+
 
         cleaned = [points[0]]
         for p in points[1:]:
